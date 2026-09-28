@@ -1,4 +1,7 @@
 from pathlib import Path
+from uuid import uuid4
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
@@ -20,6 +23,52 @@ class Question(BaseModel):
     question: str
 
 
+# Background indexing
+executor = ThreadPoolExecutor(max_workers=1)
+
+jobs = {}
+jobs_lock = Lock()
+
+
+def update_job(job_id: str, **updates):
+    with jobs_lock:
+        jobs[job_id].update(updates)
+
+
+def process_document(job_id: str, file_path: str):
+    try:
+        update_job(
+            job_id,
+            status="processing",
+            stage="Extracting and chunking document",
+        )
+
+        chunks = load_document(file_path)
+
+        update_job(
+            job_id,
+            stage="Building FAISS vector index",
+            chunks=len(chunks),
+        )
+
+        build_index(chunks)
+
+        update_job(
+            job_id,
+            status="completed",
+            stage="Indexing completed",
+            chunks=len(chunks),
+        )
+
+    except Exception as exc:
+        update_job(
+            job_id,
+            status="failed",
+            stage="Indexing failed",
+            error=str(exc),
+        )
+
+
 @app.get("/health")
 def health():
     return {
@@ -30,6 +79,9 @@ def health():
 
 @app.post("/documents")
 async def upload_document(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(400, "Filename is required.")
+
     suffix = Path(file.filename).suffix.lower()
 
     if suffix not in {".pdf", ".docx", ".txt", ".md"}:
@@ -38,16 +90,49 @@ async def upload_document(file: UploadFile = File(...)):
             "Supported files: PDF, DOCX, TXT, MD",
         )
 
-    target = settings.upload_dir / Path(file.filename).name
+    safe_filename = Path(file.filename).name
+    target = settings.upload_dir / safe_filename
+
     target.write_bytes(await file.read())
 
-    chunks = load_document(str(target))
-    build_index(chunks)
+    job_id = str(uuid4())
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "job_id": job_id,
+            "filename": safe_filename,
+            "status": "queued",
+            "stage": "Waiting to start",
+            "chunks": 0,
+            "error": None,
+        }
+
+    executor.submit(
+        process_document,
+        job_id,
+        str(target),
+    )
 
     return {
-        "filename": target.name,
-        "chunks_indexed": len(chunks),
+        "job_id": job_id,
+        "filename": safe_filename,
+        "status": "queued",
+        "message": "Document uploaded. Indexing started in the background.",
     }
+
+
+@app.get("/documents/status/{job_id}")
+def document_status(job_id: str):
+    with jobs_lock:
+        job = jobs.get(job_id)
+
+    if not job:
+        raise HTTPException(
+            404,
+            "Job not found.",
+        )
+
+    return job
 
 
 @app.post("/ask")
