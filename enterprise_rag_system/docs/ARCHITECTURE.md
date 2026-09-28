@@ -141,18 +141,3 @@ Other production considerations include:
 * Managed vector storage
 * Monitoring and alerting
 
-````
-
-### What to do
-
-Open:
-
-**`docs/ARCHITECTURE.md` → ✏️ Edit**
-
-Replace the old content with the version above and commit:
-
-```text
-Update architecture documentation
-````
-
-After that, we'll check your **`scripts/` folder** before deciding what to keep.
